@@ -28,6 +28,7 @@
     "brain:check": "node scripts/brain-check.mjs"
   },
   "dependencies": {
+    "@napi-rs/keyring": "^1.3.0",
     "xstate": "^5.24.0"
   },
   "peerDependencies": {

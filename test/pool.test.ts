@@ -1,10 +1,12 @@
 import { createAssistantMessageEventStream, type AssistantMessageEvent, type Model } from "@earendil-works/pi-ai";
+import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ProviderConfig } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { InMemoryCredentialStore, MacOSKeychainCredentialStore } from "../src/credential-store.js";
+import { enrollOAuthCredential, freshCredential, saveEnrollment } from "../src/auth.js";
+import { FallbackCredentialStore, FileCredentialStore, InMemoryCredentialStore, MacOSKeychainCredentialStore } from "../src/credential-store.js";
 import codexAccountPool from "../src/index.js";
 import { classifyProviderError } from "../src/errors.js";
 import { decodeJwtIdentity } from "../src/jwt.js";
@@ -84,18 +86,18 @@ function jwt(payload: object) {
 
 describe("extension registration", () => {
   it("wraps the built-in provider without replacing its model catalog", () => {
-    const registrations: Array<{ name: string; config: ProviderConfig }> = [];
     const commands: string[] = [];
     codexAccountPool({
-      registerProvider: (name: string, config: ProviderConfig) => registrations.push({ name, config }),
       registerCommand: (name: string) => commands.push(name),
     } as unknown as ExtensionAPI);
 
-    expect(registrations).toHaveLength(1);
-    expect(registrations[0]?.name).toBe("openai-codex");
-    expect(registrations[0]?.config.models).toBeUndefined();
-    expect(registrations[0]?.config.streamSimple).toBeTypeOf("function");
-    expect(commands).toEqual(["codex-pool-status", "codex-pool-refresh"]);
+    expect(getApiProvider("openai-codex-responses")?.streamSimple).toBeTypeOf("function");
+    expect(commands).toEqual([
+      "codex-pool-status",
+      "codex-pool-import-current",
+      "codex-pool-add",
+      "codex-pool-refresh",
+    ]);
   });
 });
 
@@ -164,6 +166,19 @@ describe("stream retry", () => {
     expect(events.map((e) => e.type)).toEqual(["start", "text_delta", "error"]);
   });
 
+  it("surfaces credential refresh failures as terminal stream errors", async () => {
+    const creds = new InMemoryCredentialStore();
+    const events = await collect(streamSimpleWithPool(model, { messages: [] }, undefined, {
+      metadata: metadata(),
+      credentials: creds,
+      resolveCredential: async () => { throw new Error("refresh-secret-should-not-leak"); },
+    }));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "error", error: { errorMessage: "Could not refresh credential for A" } });
+    expect(JSON.stringify(events)).not.toContain("refresh-secret-should-not-leak");
+  });
+
   it("surfaces pool exhausted and generic errors without hanging", async () => {
     const creds = new InMemoryCredentialStore();
     await creds.set("a", { accessToken: "token-a" });
@@ -199,19 +214,89 @@ describe("JWT labels", () => {
   });
 });
 
+describe("OAuth enrollment", () => {
+  it("adds a verified account and rejects a browser login for the wrong email", () => {
+    const oauth = {
+      access: jwt({
+        "https://api.openai.com/profile": { email: "joelhooks@gmail.com" },
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct_gmail" },
+      }),
+      refresh: "refresh-secret",
+      expires: 2_000_000_000_000,
+    };
+    const enrolled = enrollOAuthCredential(metadata(), oauth, "joelhooks@gmail.com", new Date("2026-07-09T00:00:00.000Z"));
+
+    expect(enrolled.profile).toMatchObject({ label: "joelhooks@gmail.com", email: "joelhooks@gmail.com", accountId: "acct_gmail" });
+    expect(enrolled.credential).toMatchObject({ refreshToken: "refresh-secret", expiresAt: 2_000_000_000_000 });
+    expect(enrolled.metadata.profiles).toHaveLength(3);
+    expect(() => enrollOAuthCredential(metadata(), oauth, "joel@skillrecordings.com")).toThrow(/nothing was saved/);
+  });
+
+  it("rolls credential storage back when metadata persistence fails", async () => {
+    const store = new InMemoryCredentialStore();
+    await store.set("existing", { accessToken: "old-access", refreshToken: "old-refresh" });
+    const result = {
+      credential: { accessToken: "new-access", refreshToken: "new-refresh" },
+      profile: { id: "existing", label: "person@example.test" },
+      metadata: { ...metadata(), profiles: [{ id: "existing", label: "person@example.test" }] },
+    };
+
+    await expect(saveEnrollment(result, store, async () => { throw new Error("disk full"); })).rejects.toThrow("disk full");
+    expect(await store.get("existing")).toEqual({ accessToken: "old-access", refreshToken: "old-refresh" });
+  });
+
+  it("refreshes an expiring credential once for concurrent requests", async () => {
+    const store = new InMemoryCredentialStore();
+    await store.set("a", { accessToken: "old", refreshToken: "refresh-old", expiresAt: 1_000 });
+    let calls = 0;
+    const refresh = async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { access: "new", refresh: "refresh-new", expires: Date.now() + 3_600_000 };
+    };
+
+    const [first, second] = await Promise.all([
+      freshCredential("a", store, refresh, Date.now()),
+      freshCredential("a", store, refresh, Date.now()),
+    ]);
+
+    expect(calls).toBe(1);
+    expect(first?.accessToken).toBe("new");
+    expect(second?.refreshToken).toBe("refresh-new");
+  });
+});
+
 describe("credential storage", () => {
-  it("passes keychain secrets through stdin, never argv", async () => {
-    const calls: Array<{ args: string[]; stdin?: string }> = [];
-    const store = new MacOSKeychainCredentialStore("test-service", async (args, stdin) => {
-      calls.push({ args, stdin });
-      return "";
-    });
+  it("uses the native keyring binding without process argv", async () => {
+    let password = "";
+    const store = new MacOSKeychainCredentialStore("test-service", () => ({
+      getPassword: () => password,
+      setPassword: (value) => { password = value; },
+      deletePassword: () => { password = ""; },
+    }));
 
     await store.set("profile-a", { accessToken: "access-secret", refreshToken: "refresh-secret" });
 
-    expect(calls[0]?.args.join(" ")).not.toMatch(/access-secret|refresh-secret/);
-    expect(calls[0]?.args.at(-1)).toBe("-w");
-    expect(calls[0]?.stdin).toContain("access-secret");
+    expect(JSON.parse(password)).toEqual({ accessToken: "access-secret", refreshToken: "refresh-secret" });
+    expect(await store.get("profile-a")).toEqual({ accessToken: "access-secret", refreshToken: "refresh-secret" });
+  });
+
+  it("falls back to a 0600 credential file when Keychain writes are denied", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pool-creds-"));
+    const primary = {
+      get: async () => undefined,
+      set: async () => { throw new Error("User interaction is not allowed"); },
+      delete: async () => {},
+    };
+    const fallback = new FileCredentialStore(dir);
+    const store = new FallbackCredentialStore(primary, fallback);
+    try {
+      await store.set("profile-a", { accessToken: "access-secret", refreshToken: "refresh-secret" });
+      expect(await store.get("profile-a")).toEqual({ accessToken: "access-secret", refreshToken: "refresh-secret" });
+      expect(await metadataMode(join(dir, "profile-a.json"))).toBe(0o600);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

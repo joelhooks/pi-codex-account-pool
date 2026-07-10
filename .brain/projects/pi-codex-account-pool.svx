@@ -4,12 +4,12 @@ tags:
   - pi
   - openai-codex
   - oauth
-status: prototype
+status: local-alpha
 ---
 
 # Pi Codex Account Pool
 
-Standalone local prototype package for a Pi `0.80.6` extension. It is intentionally not wired to live OAuth or quota mutation yet.
+Standalone local alpha package for a Pi `0.80.6` extension. OAuth enrollment and automatic session credential refresh are wired; quota and reset-credit mutation are not.
 
 ## Decisions
 
@@ -17,12 +17,15 @@ Standalone local prototype package for a Pi `0.80.6` extension. It is intentiona
 - Keep `openai-codex/gpt-5.6-sol` as the selected model; only inject the selected profile access token as `options.apiKey`.
 - Do not use a synthetic provider ID: Pi's Codex conversion logic keys tool-call ID handling on the built-in provider identity.
 - Store only secret-free profile metadata on disk with `0600` permissions.
-- Keep OAuth access/refresh tokens behind `CredentialStore`.
+- Keep OAuth credentials behind `CredentialStore`: native macOS Keychain first, with per-profile `0600` files as a fallback when background launchd sessions are denied Keychain interaction.
 - Retry once only for exact structured `usage_limit_reached` before meaningful output.
 - Do not rotate for generic 429, auth, transport, or model errors.
 - Decode email/account labels from JWT claims without logging raw JWTs.
+- Enroll additional accounts with an expected email; reject a browser session authenticated as the wrong account before writing Keychain or metadata.
+- Preserve Pi's current native `openai-codex` OAuth credential before adding another account.
+- Refresh expiring OAuth credentials through OpenAI's refresher and persist rotated credentials back through the active `CredentialStore` backend.
 - Read quota through `GET https://chatgpt.com/backend-api/wham/usage` in future live wiring; tests mock fetch only.
 
 ## Next live slice
 
-Add account login/profile enrollment through safe Pi UI callbacks, then wire `/codex-pool-refresh` to the quota client. Reset-credit mutation stays explicit and separate.
+Wire `/codex-pool-refresh` to the quota client, then add explicit account pin/remove controls. Reset-credit mutation stays explicit and separate. Fleet rollout still requires central cross-host refresh and lease serialization.

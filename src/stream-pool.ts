@@ -2,7 +2,7 @@ import { createAssistantMessageEventStream, type AssistantMessageEvent, type Ass
 import { streamSimple as builtinStreamSimple } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { classifyProviderError } from "./errors.js";
 import { selectAlternateProfile, selectProfile } from "./selection.js";
-import type { CredentialStore, PoolMetadata, PoolProfile } from "./types.js";
+import type { CredentialStore, PoolMetadata, PoolProfile, StoredCredential } from "./types.js";
 
 export type CodexDelegate = StreamFunction<"openai-codex-responses", SimpleStreamOptions>;
 export type MetadataWriter = (metadata: PoolMetadata) => Promise<void> | void;
@@ -10,6 +10,7 @@ export type MetadataWriter = (metadata: PoolMetadata) => Promise<void> | void;
 export interface PooledStreamOptions {
   metadata: PoolMetadata | (() => Promise<PoolMetadata> | PoolMetadata);
   credentials: CredentialStore;
+  resolveCredential?: (profile: PoolProfile) => Promise<Awaited<ReturnType<CredentialStore["get"]>>>;
   writeMetadata?: MetadataWriter;
   delegate?: CodexDelegate;
   now?: () => Date;
@@ -41,7 +42,7 @@ async function runPooledStream(
     pushError(output, model, "Codex account pool exhausted");
     return;
   }
-  const firstResult = await attempt(first, delegate, model, context, options, pool.credentials, output, true);
+  const firstResult = await attempt(first, delegate, model, context, options, pool, output, true);
   if (firstResult === "done" || firstResult === "streaming-error") return;
   const alternate = selectAlternateProfile(metadata, first.id, now());
   if (alternate) {
@@ -52,7 +53,7 @@ async function runPooledStream(
       profiles: metadata.profiles.map((p) => p.id === first.id ? { ...p, exhaustedUntil: firstResult.resetsAt } : p),
     };
     await pool.writeMetadata?.(metadata);
-    await attempt(alternate, delegate, model, context, options, pool.credentials, output, false);
+    await attempt(alternate, delegate, model, context, options, pool, output, false);
     return;
   }
   metadata = {
@@ -73,11 +74,19 @@ async function attempt(
   model: Model<"openai-codex-responses">,
   context: Context,
   options: SimpleStreamOptions | undefined,
-  credentials: CredentialStore,
+  pool: Pick<PooledStreamOptions, "credentials" | "resolveCredential">,
   output: AssistantMessageEventStream,
   allowRetrySignal: boolean,
 ): Promise<AttemptResult> {
-  const credential = await credentials.get(profile.id);
+  let credential: StoredCredential | undefined;
+  try {
+    credential = pool.resolveCredential
+      ? await pool.resolveCredential(profile)
+      : await pool.credentials.get(profile.id);
+  } catch {
+    pushError(output, model, `Could not refresh credential for ${profile.label}`);
+    return "streaming-error";
+  }
   if (!credential?.accessToken) {
     pushError(output, model, `Missing credential for ${profile.label}`);
     return "streaming-error";
