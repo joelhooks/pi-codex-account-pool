@@ -1,0 +1,28 @@
+---
+title: Pi Codex Account Pool
+tags:
+  - pi
+  - openai-codex
+  - oauth
+status: prototype
+---
+
+# Pi Codex Account Pool
+
+Standalone local prototype package for a Pi `0.80.6` extension. It is intentionally not wired to live OAuth or quota mutation yet.
+
+## Decisions
+
+- Override the existing `openai-codex` stream handler while preserving Pi's native model catalog and provider identity.
+- Keep `openai-codex/gpt-5.6-sol` as the selected model; only inject the selected profile access token as `options.apiKey`.
+- Do not use a synthetic provider ID: Pi's Codex conversion logic keys tool-call ID handling on the built-in provider identity.
+- Store only secret-free profile metadata on disk with `0600` permissions.
+- Keep OAuth access/refresh tokens behind `CredentialStore`.
+- Retry once only for exact structured `usage_limit_reached` before meaningful output.
+- Do not rotate for generic 429, auth, transport, or model errors.
+- Decode email/account labels from JWT claims without logging raw JWTs.
+- Read quota through `GET https://chatgpt.com/backend-api/wham/usage` in future live wiring; tests mock fetch only.
+
+## Next live slice
+
+Add account login/profile enrollment through safe Pi UI callbacks, then wire `/codex-pool-refresh` to the quota client. Reset-credit mutation stays explicit and separate.

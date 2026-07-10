@@ -1,0 +1,48 @@
+{
+  "name": "@joelhooks/pi-codex-account-pool",
+  "version": "0.1.0",
+  "description": "Pi extension for safely selecting among multiple OpenAI Codex subscription profiles.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest --run --dir test",
+    "brain:check": "node scripts/brain-check.mjs"
+  },
+  "dependencies": {
+    "xstate": "^5.24.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.80.6 <0.81.0",
+    "@earendil-works/pi-coding-agent": ">=0.80.6 <0.81.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@types/node": "24.12.4",
+    "typescript": "5.9.3",
+    "vitest": "4.1.9"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,9 @@
+node_modules/
+.pi-subagents/
+.pi/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.pool-metadata.json
